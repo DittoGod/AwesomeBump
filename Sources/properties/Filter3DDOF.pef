@@ -1,0 +1,128 @@
+#include "Core/PropertyCore.h"
+#include "Core/PropertyGUI.h"
+
+
+property_set Filter3DDOF
+{
+    Bool EnableEffect
+    {
+        description = "EnableEffect";
+        displayName      = "Enable DOF";
+        value     = true;
+    }
+    Float FocalLength
+    {
+        description = "Focal length in mm";
+        displayName = "Focal Lenght";
+        value = 25.0f;
+        minValue = 0;
+        maxValue = 100.f;
+        stepValue = 1.0f;
+
+    }
+
+    Float FocalDepth
+    {
+        description = "Focal distance value in meters, but you may use autofocus option below";
+        displayName = "Focal Depth";
+        value = 10.0f;
+        minValue = 0;
+        maxValue = 100.f;
+        stepValue = 1.0f;
+        state = QtnPropertyStateInvisible; // not used in GUI
+    }
+
+    Float FocalStop
+    {
+        description = "f-stop value";
+        displayName = "f-stop";
+        value = 140.0f;
+        minValue = 0;
+        maxValue = 400.f;
+        stepValue = 2.0f;
+    }
+
+    Int NoSamples
+    {
+        description = "Number of samples on the first ring";
+        displayName = "Num. samples";
+        value = 4;
+        minValue = 1;
+        maxValue = 20;
+        stepValue = 1;
+    }
+
+    Int NoRings
+    {
+        description = "Number of rings";
+        displayName = "Num. rings";
+        value = 7;
+        minValue = 1;
+        maxValue = 20;
+        stepValue = 1;
+    }
+
+    Bool Noise
+    {
+        description = "Use noise instead of pattern for sample dithering";
+        value = false;
+    }
+
+    Float Coc
+    {
+        description = "Circle of confusion size in mm (35mm film = 0.03mm)";
+        displayName = "Confusion circle";
+        value = 0.03f;
+        minValue = 0.0f;
+        maxValue = 0.1f;
+        stepValue = 0.001f;
+    }
+
+    Float Threshold
+    {
+        description = "Highlight threshold";
+        value = 0.25f;
+        minValue = 0.0f;
+        maxValue = 2.0f;
+        stepValue = 0.01f;
+    }
+
+    Float Gain
+    {
+        description = "Highlight gain";
+        value       = 1.0f;
+        minValue    = 0.0f;
+        maxValue    = 1.0f;
+        stepValue   = 0.01f;
+    }
+
+    Float BokehBias
+    {
+        description = "Bokeh edge bias";
+        displayName        = "Bokeh bias";
+        value       = 0.25f;
+        minValue    = 0.0f;
+        maxValue    = 5.0f;
+        stepValue   = 0.01f;
+    }
+
+    Float BokehFringe
+    {
+        description = "Bokeh chromatic aberration/fringing";
+        displayName        = "Fringing";
+        value       = 0.7f;
+        minValue    = 0.0f;
+        maxValue    = 5.0f;
+        stepValue   = 0.01f;
+    }
+
+    Double DitherAmount
+    {
+        description = "Dither amount";
+        displayName        = "Dither amount";
+        value       = 0.0001;
+        minValue    = 0.0;
+        maxValue    = 0.001;
+        stepValue   = 0.00001;
+    }
+}

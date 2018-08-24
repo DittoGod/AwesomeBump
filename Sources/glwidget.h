@@ -51,6 +51,13 @@
 #include "utils/qglbuffers.h"
 #include "glwidgetbase.h"
 #include "glimageeditor.h"
+#include "properties/Dialog3DGeneralSettings.h"
+#include "utils/glslshaderparser.h"
+
+#define settings3D      Dialog3DGeneralSettings::settings3D
+#define currentShader   Dialog3DGeneralSettings::currentRenderShader
+#define glslShadersList Dialog3DGeneralSettings::glslParsedShaders
+
 
 #ifdef USE_OPENGL_330
     #include <QOpenGLFunctions_3_3_Core>
@@ -75,8 +82,7 @@ public:
     void setPointerToTexture(QGLFramebufferObject **pointer, TextureTypes type);
 
 public slots:
-    void setDepthScale(int scale);
-    void setUVScale(int scale);
+
 
     void toggleDiffuseView(bool);
     void toggleSpecularView(bool);
@@ -85,13 +91,6 @@ public slots:
     void toggleHeightView(bool);
     void toggleRoughnessView(bool);
     void toggleMetallicView(bool);
-    void selectShadingType(int);
-    void selectShadingModel(int i);
-
-    void setSpecularIntensity(double);
-    void setDiffuseIntensity(double);
-    void setLightParameters(float,float);
-    void setUVScaleOffset(double x,double y);
     void setCameraMouseSensitivity(int value);
     void resetCameraPosition();
     void cleanup();
@@ -104,8 +103,8 @@ public slots:
 
     // pbr functions
     void chooseSkyBox(QString cubeMapName, bool bFirstTime = false);
-    void updatePerformanceSettings(Performance3DSettings settings);
-
+    void updatePerformanceSettings(Display3DSettings settings);
+    void recompileRenderShader(); // read and compile custom fragment shader again, can be called from 3D settings GUI.
 
 signals:
     void renderGL();
@@ -135,7 +134,7 @@ private:
                       QVector4D& objectCoordinate);
 
     void bakeEnviromentalMaps(); // calculate prefiltered enviromental map
-    QOpenGLShaderProgram *program;    
+
     QOpenGLShaderProgram *line_program; // same as "program" but instead of triangles lines are used
     QOpenGLShaderProgram *skybox_program;
     QOpenGLShaderProgram *env_program;
@@ -143,14 +142,7 @@ private:
     QGLFramebufferObject**  fboIdPtrs[8];
 
 
-    // parameters plane
-    float depthScale;
-    float uvScale;
-    QVector2D uvOffset;
-    float specularIntensity;
-    float diffuseIntensity;
-    float lightPower ;
-    float lightRadius;
+
     bool bToggleDiffuseView;
     bool bToggleSpecularView;
     bool bToggleOcclusionView;
@@ -159,9 +151,7 @@ private:
     bool bToggleRoughnessView;
     bool bToggleMetallicView;
 
-    ShadingType shadingType;
-    ShadingModel shadingModel;
-    Performance3DSettings performanceSettings;
+    Display3DSettings display3Dparameters;
 
     // 3D view parameters
     QMatrix4x4 projectionMatrix;
@@ -202,6 +192,8 @@ private:
     // glow FBOs
     GLFrameBufferObject* glowInputColor[4];
     GLFrameBufferObject* glowOutputColor[4];
+    // tone mapping mipmaps FBOS
+    GLFrameBufferObject* toneMipmaps[10];
 
     GLuint lensFlareColorsTexture;
     GLuint lensDirtTexture;

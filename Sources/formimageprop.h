@@ -13,7 +13,6 @@
 
 #include "formimagebase.h"
 #include "dialogheightcalculator.h"
-#include "formbasemapconversionlevels.h"
 
 
 namespace Ui {
@@ -29,31 +28,20 @@ public:
     void setImage(QImage image);
     void setPtrToGLWidget(QGLWidget* ptr){ imageProp.glWidget_ptr = ptr;  }
 
-
-    void hideHeightInputGroup();
-    void hideBMGroupBox();
-    void hideSpecularGroupBox();
-    void hideNormalStepBar();
-    void hideOcclusionInputGroup();
-    void hideHeightProcessingBox();
-    void hideSelectiveBlurBox();
-    void hideGrayScaleControl();
-    void setSpecularControlChecked();
+    void setupPopertiesGUI();
     void reloadSettings();
-    // hide input groups
-    void hideNormalInputGroup();
-    void hideSpecularInputGroup();
-    void hideRoughnessInputGroup();
-    void showNormalMixerGroup();
-    void showGrungeSettingsGroup();
-    void showGrungeMainImageWeightSlider();
-    void hideGrungeBlendinModeComboBox();
-
+    bool loadFile(const QString &fileName);
 
     ~FormImageProp();
 
 public slots:
 
+    void propertyChanged(const QtnPropertyBase* changedProperty,
+                         const QtnPropertyBase* firedProperty,
+                         QtnPropertyChangeReason reason);
+    void propertyFinishedEditing();
+    void applyBaseConversion(const QtnPropertyButton* button); // convert Basemap to other textures
+    void pasteNormalFromClipBoard(const QtnPropertyButton*);
 
     void reloadImageSettings();
     void pasteFromClipboard();
@@ -63,30 +51,23 @@ public slots:
     void updateGuiSpinBoxesAndLabes(int);
     void updateSlidersOnRelease();
 
-    void updateGuiCheckBoxes();
-    void updateSlidersNow(int);
-
-
     void applyHeightToNormalConversion();
     void applyNormalToHeightConversion();
     void applyBaseConversionConversion();    
     void applyHeightNormalToOcclusionConversion();
 
+    /**
+     * Restore to default settings.
+     */
 
     void showHeightCalculatorDialog();
-
-    void toggleColorPicking(bool toggle);
-    void togglePreviewSelectiveBlurMask(bool toggle);
-    void colorPicked(QVector4D);
-    void cancelColorPicking();
+    void pickColorFromImage(QtnPropertyABColor *property);
 
     // normal mixer
-    void openNormalMixerImage();
     void pasteNormalFromClipBoard();
 
     // grunge
-    void toggleGrungeImageSettingsGroup(bool toggle);
-    void invertGrunge(bool toggle);
+    void toggleGrungeImageSettingsGroup(bool toggle);    
     void loadPredefinedGrunge(QString);
 
 signals:
@@ -99,20 +80,21 @@ signals:
     void conversionHeightNormalToOcclusionApplied();
     void recalculateOcclusion();
     void toggleColorPickingApplied(bool toggle);
+    void pickImageColor( QtnPropertyABColor* property);
     void toggleGrungeSettings(bool toggle);
 
 
 private:
-    bool loadFile(const QString &fileName);
+
     void pasteImageFromClipboard(QImage& _image);
 
-    bool bLoading;
+
     Ui::FormImageProp *ui;
     DialogHeightCalculator      *heightCalculator;     // height calculator tool
-    FormBaseMapConversionLevels* baseMapConvLevels[4]; // for levels of mipmaps
+
 
 public:
-
+    static bool bLoading;
     bool bOpenNormalMapMixer;
 
 

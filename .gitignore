@@ -1,4 +1,6 @@
-/Bin/config.ini
+Bin/config.ini
+Bin/Configs/*
+
 build/Makefile
 *.pydevproject
 .project
@@ -12,9 +14,10 @@ local.properties
 .classpath
 .settings/
 .loadpath
-
+*.peg.*
+*.so*
 .externalToolBuilders/
-
+Bin/AwesomeBump
 *.launch
 
 .cproject
@@ -174,3 +177,6 @@ log.txt
 .merge_file_Gs5ohI
 Sources/AwesomeBump.pro.user.d869918
 Sources/AwesomeBump.pro.user.1ac2611
+
+build-*
+workdir

@@ -24,10 +24,12 @@ FormSettingsContainer::FormSettingsContainer(QWidget *parent) :
     qDebug() << "Reading the list of available configs settings:";
     // reading configs
     for (int i = 0; i < iniFiles.size(); ++i){
+        if(iniFiles[i] == "gui.ini") continue;
         FormSettingsField* sfield = new FormSettingsField("Configs/"+iniFiles[i],this);
         connect(sfield,SIGNAL(emitDeleteSettings(FormSettingsField*)),this,SLOT(removeSetting(FormSettingsField*)));
         connect(sfield,SIGNAL(emitLoadSettings(FormSettingsField*))  ,this,SLOT(reloadSettings(FormSettingsField*)));
         connect(sfield,SIGNAL(emitSaveSettings())  ,this,SLOT(saveSettings()));
+        connect(sfield,SIGNAL(emitLoadAndConvert()),this,SLOT(loadAndConvert()));
         ui->verticalLayoutSettingsList->addWidget(sfield);
 
 
@@ -54,6 +56,8 @@ void FormSettingsContainer::addNewSettingsField(){
     connect(sfield,SIGNAL(emitDeleteSettings(FormSettingsField*)),this,SLOT(removeSetting(FormSettingsField*)));
     connect(sfield,SIGNAL(emitLoadSettings(FormSettingsField*))  ,this,SLOT(reloadSettings(FormSettingsField*)));
     connect(sfield,SIGNAL(emitSaveSettings())  ,this,SLOT(saveSettings()));
+    connect(sfield,SIGNAL(emitLoadAndConvert()),this,SLOT(loadAndConvert()));
+
     ui->verticalLayoutSettingsList->addWidget(sfield);
     settingsList.push_back(sfield);
 }
@@ -76,6 +80,11 @@ void FormSettingsContainer::reloadSettings(FormSettingsField* field){
     }
     emit reloadConfigFile();
 }
+
+void FormSettingsContainer::loadAndConvert(){
+    emit emitLoadAndConvert();
+}
+
 void FormSettingsContainer::saveSettings(){
     for(int i = 0 ; i < settingsList.size() ; i++){
         settingsList[i]->resetBackGroundColor();

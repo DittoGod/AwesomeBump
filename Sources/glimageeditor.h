@@ -59,6 +59,17 @@
     #define OPENGL_FUNCTIONS QOpenGLFunctions_4_0_Core
 #endif
 
+#define BasicProp activeImage->properties->Basic
+#define RemoveShadingProp activeImage->properties->RemoveShading
+#define ColorLevelsProp activeImage->properties->ColorLevels
+#define SurfaceDetailsProp activeImage->properties->SurfaceDetails
+#define AOProp activeImage->properties->AO
+#define GrungeProp targetImageGrunge->properties->Grunge
+#define GrungeOnImageProp activeImage->properties->GrungeOnImage
+#define NormalMixerProp activeImage->properties->NormalsMixer
+#define BaseMapToOthersProp activeImage->properties->BaseMapToOthers
+#define RMFilterProp activeImage->properties->RMFilter
+
 //! [0]
 class GLImage : public GLWidgetBase , protected OPENGL_FUNCTIONS
 {
@@ -79,6 +90,7 @@ public:
     void updateCornersPosition(QVector2D dc1,QVector2D dc2,QVector2D dc3,QVector2D dc4);
     void render();
 
+
     FBOImageProporties* targetImageDiffuse;
     FBOImageProporties* targetImageNormal;
     FBOImageProporties* targetImageHeight;
@@ -91,13 +103,16 @@ public:
     FBOImageProporties* targetImageMaterial;
 public slots:
     void resizeFBO(int width, int height);
-
+    void imageChanged();
     void resetView();
     void selectPerspectiveTransformMethod(int method);
     void selectUVManipulationMethod(UVManipulationMethods method);
     void updateCornersWeights(float w1, float w2, float w3, float w4);
     void selectSeamlessMode(SeamlessMode mode);
     void toggleColorPicking(bool toggle);
+    void pickImageColor(QtnPropertyABColor *property);
+
+    void copyRenderToPaintFBO(); // when image is rendered copy it to paintFBO in order to display result
 signals:
     void rendered();
     void readyGL();
@@ -142,6 +157,9 @@ public:
     void applyCPUNormalizationFilter(QGLFramebufferObject* inputFBO,
                                   QGLFramebufferObject* outputFBO);
 
+    void applyAddNoiseFilter(QGLFramebufferObject* inputFBO,
+                             QGLFramebufferObject* outputFBO);
+
     void applyGaussFilter(QGLFramebufferObject* sourceFBO, QGLFramebufferObject *auxFBO,
                           QGLFramebufferObject* outputFBO, int no_iter, float w =0);
 
@@ -160,19 +178,13 @@ public:
 
     void applyDGaussiansFilter(QGLFramebufferObject* inputFBO,
                              QGLFramebufferObject *auxFBO,
-                             QGLFramebufferObject* outputFBO, bool bUseSelectiveBlur = false);
+                             QGLFramebufferObject* outputFBO);
 
     void applyContrastFilter(QGLFramebufferObject* inputFBO,
-                             QGLFramebufferObject* outputFBO, bool bUseSelectiveBlur = false);
+                             QGLFramebufferObject* outputFBO);
 
     void applyHeightProcessingFilter( QGLFramebufferObject* inputFBO,
-                                      QGLFramebufferObject* outputFBO,
-                                      bool bUseSelectiveBlur = false);
-
-    void applyMaskedGaussFilter(QGLFramebufferObject* sourceFBO,
-                                QGLFramebufferObject* maskFBO,
-                                QGLFramebufferObject *auxFBO, QGLFramebufferObject *aux2FBO,
-                                QGLFramebufferObject* outputFBO);
+                                      QGLFramebufferObject* outputFBO);
 
     void applyRemoveLowFreqFilter(QGLFramebufferObject* inputFBO,
                                   QGLFramebufferObject* auxFBO,
@@ -279,10 +291,14 @@ private:
     QGLFramebufferObject* auxFBO2BMLevels[3]; //
     QGLFramebufferObject* auxFBO0BMLevels[3]; //
 
+    //
+    QGLFramebufferObject* paintFBO;  // Used for painting texture
+    QGLFramebufferObject* renderFBO; // Used for rendering to it
 
     std::map<std::string,GLuint> subroutines;
     std::map<std::string,QOpenGLShaderProgram*> filter_programs; // all filters in one array
 
+    GLuint vao;
     GLuint vbos[3];
     ConversionType conversionType;
     bool bShadowRender;
@@ -315,6 +331,7 @@ private:
     int gui_seamless_mode; // if 0 standard blending, if 1 mirror mode
 
     bool bToggleColorPicking;
+    QtnPropertyABColor* ptr_ABColor;
 
     // uv manipulations method
     UVManipulationMethods uvManilupationMethod;
@@ -322,6 +339,9 @@ private:
     // openGL 330 variables
 
     TextureTypes openGL330ForceTexType;
+
+    // rendering variables
+    bool bRendering;//define if opengl is currently rendering some textures
 };
 
 

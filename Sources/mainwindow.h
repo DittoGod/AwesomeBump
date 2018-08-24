@@ -6,16 +6,22 @@
 #include <QFileDialog>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QAction>
 #include <QDir>
-#include "glwidget.h"
-#include "glimageeditor.h"
-#include "formimageprop.h"
-#include "formsettingscontainer.h"
-#include "formmaterialindicesmanager.h"
-#include "CommonObjects.h"
-#include "dialoglogger.h"
-#include "dialogshortcuts.h"
 
+#include "CommonObjects.h"
+
+class QLabel;
+
+class GLWidget;
+class GLImage;
+class FormImageProp;
+class FormMaterialIndicesManager;
+class FormSettingsContainer;
+class DockWidget3DSettings;
+class Dialog3DGeneralSettings;
+class DialogLogger;
+class DialogShortcuts;
 
 namespace Ui {
 class MainWindow;
@@ -30,16 +36,25 @@ public:
 
     QSize sizeHint() const;
     ~MainWindow();
+
 protected:
+
      void closeEvent(QCloseEvent *event);
      void resizeEvent(QResizeEvent* event);
      void showEvent(QShowEvent* event);
+
+signals:
+
+	void initProgress(int perc);
+	void initMessage(const QString &msg);
 
 public slots:
 
     void aboutQt();
     void about();
   
+	void initializeApp();
+
     void initializeGL();
     void initializeImages();
 
@@ -50,14 +65,14 @@ public slots:
     void changeGUIFontSize(int);
     // loading the application setting from ini file
     void loadSettings();
-    // the same but loading configs
-    void loadImageSettings(QString abbr,FormImageProp* image);
     // the same as above but Image is choosen by proper switch using the given type
     void loadImageSettings(TextureTypes type);
     void showSettingsManager();
-
     void setOutputFormat(int index);
     void replotAllImages();
+    void materialsToggled(bool toggle);
+    void checkWarnings();
+
 
     // repaint views after selecting tab
     void selectDiffuseTab();
@@ -99,14 +114,10 @@ public slots:
     void applyScaleImage();
     void applyCurrentUVsTransformations();// copy current image to diffuse and convert to others
 
+
     // Setting the global parameters
-    void setSpecularIntensity(int);
-    void setDiffuseIntensity(int);
     void updateSpinBoxes(int);
     void selectShadingModel(int i);
-    // change current performance settings
-    void updatePerformanceSettings();
-    void updatePerformanceSettings(int);
 
     // Conversion functions
     void convertFromHtoN();
@@ -126,14 +137,17 @@ public slots:
     void selectContrastInputImage(int mode);
 
 private:
-    // saves current settings of given image to config file. The param: abbr is e.g for diffuse image: "d"
-    void saveImageSettings(QString abbr,FormImageProp* image);
+    // batch tool
+    void selectSourceImages();
+    void selectOutputPath();
+    void runBatch();
     // saves all textures to given directory
     bool saveAllImages(const QString &dir);
 
     // Pointers
     Ui::MainWindow *ui;
     GLWidget* glWidget;
+
     GLImage* glImage;
     
     bool bSaveCheckedImages;
@@ -155,6 +169,12 @@ private:
 
     // Settings container
     FormSettingsContainer *settingsContainer;
+    QtnPropertySetAwesomeBump* abSettings;// use qtn to keep all settings in one place
+    // 3D settings manager
+    DockWidget3DSettings *dock3Dsettings;
+
+    // 3D shading & display settings dialog
+    Dialog3DGeneralSettings* dialog3dGeneralSettings;
 
     QAction *aboutQtAction;
     QAction *aboutAction;
@@ -162,10 +182,39 @@ private:
     QAction *shortcutsAction; // show key shortcuts
 
     QLabel  *statusLabel;
+
     DialogLogger* dialogLogger;
     DialogShortcuts* dialogShortcuts;
     QSettings defaults;
 
+    // page navigation
+    QComboBox *pageSel;
+    void configureToolbarAndStatusline();
+
+private:
+    void setTabText(int index, const char *title);
+    void setTabEnabled(int index, bool value);
+};
+
+class CloneAction : public QAction {
+    Q_OBJECT
+  public:
+    CloneAction(QAction *original, QObject *parent = 0) : QAction(parent), m_orig(original) {
+      connect(this, SIGNAL(triggered()), original, SLOT(trigger()));      // trigger on triggered
+      connect(this, SIGNAL(toggle(bool)), original, SLOT(toggle(bool)));  // trigger on toggled
+
+      connect(original, SIGNAL(changed()), this, SLOT(__update()));       // update on change
+      connect(original, SIGNAL(destroyed()), this, SLOT(deleteLater()));  // delete on destroyed
+      __update();
+    }
+  private slots:
+    void __update() {
+      static QStringList props = QStringList() << "text" << "iconText" << "enabled" << "checkable" << "checked";
+      foreach(const QString prop, props)
+        setProperty(qPrintable(prop), m_orig->property(qPrintable(prop)));
+    }
+  private:
+    QAction *m_orig;
 };
 
 #endif // MAINWINDOW_H

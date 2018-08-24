@@ -1,0 +1,70 @@
+#include "Core/PropertyCore.h"
+#include "Core/PropertyGUI.h"
+
+
+property_set Filter3DBloom
+{
+    Bool EnableEffect
+    {
+        description = "EnableEffect";
+        displayName      = "Enable Bloom";
+        value     = true;
+    }
+    Float WeightA
+    {
+        description = "Weight of Layer A.";
+        displayName      = "Layer A";
+        value     = 0.25f;
+        minValue  = 0.0f;
+        maxValue  = 1.0f;
+        stepValue = 0.01f;
+    }
+    Float WeightB
+    {
+        description = "Weight of Layer B";
+        displayName      = "Layer B";
+        value     = 0.25f;
+        minValue  = 0.0f;
+        maxValue  = 1.0f;
+        stepValue = 0.01f;
+    }
+    Float WeightC
+    {
+        description = "Weight of Layer C";
+        displayName      = "Layer C";
+        value     = 0.25f;
+        minValue  = 0.0f;
+        maxValue  = 1.0f;
+        stepValue = 0.01f;
+    }
+    Float WeightD
+    {
+        description = "Weight of Layer  D";
+        displayName      = "Layer D";
+        value     = 0.25f;
+        minValue  = 0.0f;
+        maxValue  = 1.0f;
+        stepValue = 0.01f;
+    }
+
+    Float Vignette
+    {
+        description = "Vignette size";
+        displayName      = "Vignette size";
+        value     = 0.4f;
+        minValue  = 0.0f;
+        maxValue  = 1.0f;
+        stepValue = 0.01f;
+    }
+
+    Float VignetteAtt
+    {
+        description = "Vignette attenuation";
+        displayName      = "Vignette attenuation";
+        value     = 0.8f;
+        minValue  = 0.0f;
+        maxValue  = 1.0f;
+        stepValue = 0.01f;
+    }
+
+}

@@ -47,11 +47,14 @@ GLImage::GLImage(QWidget *parent)
 {
     bShadowRender         = false;
     bSkipProcessing       = false;
-
+    bRendering            = false;
+    bToggleColorPicking   = false;
     conversionType        = CONVERT_NONE;
     uvManilupationMethod  = UV_TRANSLATE;
     cornerWeights         = QVector4D(0,0,0,0);
     fboRatio = 1;
+    renderFBO		  = NULL;
+    paintFBO		  = NULL;
 
     // initialize position of the corners
     cornerPositions[0] = QVector2D(-0.0,-0);
@@ -65,10 +68,12 @@ GLImage::GLImage(QWidget *parent)
     gui_perspective_mode =  0;
     gui_seamless_mode    =  0;
     setCursor(Qt::OpenHandCursor);
-    cornerCursors[0] = QCursor(QPixmap(":/resources/corner1.png"));
-    cornerCursors[1] = QCursor(QPixmap(":/resources/corner2.png"));
-    cornerCursors[2] = QCursor(QPixmap(":/resources/corner3.png"));
-    cornerCursors[3] = QCursor(QPixmap(":/resources/corner4.png"));
+    cornerCursors[0] = QCursor(QPixmap(":/resources/cursors/corner1.png"));
+    cornerCursors[1] = QCursor(QPixmap(":/resources/cursors/corner2.png"));
+    cornerCursors[2] = QCursor(QPixmap(":/resources/cursors/corner3.png"));
+    cornerCursors[3] = QCursor(QPixmap(":/resources/cursors/corner4.png"));
+    activeImage = NULL;
+    connect(this,SIGNAL(rendered()),this,SLOT(copyRenderToPaintFBO()));
 }
 
 GLImage::~GLImage()
@@ -100,16 +105,17 @@ void GLImage::cleanup()
       delete auxFBO1BMLevels[i] ;
       delete auxFBO2BMLevels[i] ;
   }
+  delete  paintFBO;
+  delete renderFBO;
+
 
   glDeleteBuffers(sizeof(vbos)/sizeof(GLuint), &vbos[0]);
-  //delete program;
-
   doneCurrent();
 }
 
 QSize GLImage::minimumSizeHint() const
 {
-    return QSize(360, 360);
+    return QSize(100, 100);
 
 }
 
@@ -168,16 +174,17 @@ void GLImage::initializeGL()
     filters_list.push_back("mode_grunge_randomization_filter");
     filters_list.push_back("mode_grunge_normal_warp_filter");
     filters_list.push_back("mode_normal_angle_correction_filter");
+    filters_list.push_back("mode_add_noise_filter");
 
 
 
     qDebug() << "Loading filters (fragment shader)";
     QOpenGLShader *vshader = new QOpenGLShader(QOpenGLShader::Vertex, this);
-    vshader->compileSourceFile(":/resources/filters.vert");
+    vshader->compileSourceFile(":/resources/shaders/filters.vert");
     if (!vshader->log().isEmpty()) qDebug() << vshader->log();
     else qDebug() << "done";
 
-    QFile fFile(":/resources/filters.frag");
+    QFile fFile(":/resources/shaders/filters.frag");
     fFile.open(QFile::ReadOnly);
     QTextStream inf(&fFile);
     QString shaderCode = inf.readAll();
@@ -281,9 +288,13 @@ void GLImage::initializeGL()
     GLCHK( subroutines["mode_grunge_randomization_filter"] = glGetSubroutineIndex(program->programId(),GL_FRAGMENT_SHADER,"mode_grunge_randomization_filter" ) );
     GLCHK( subroutines["mode_grunge_normal_warp_filter"]   = glGetSubroutineIndex(program->programId(),GL_FRAGMENT_SHADER,"mode_grunge_normal_warp_filter" ) );
     GLCHK( subroutines["mode_normal_angle_correction_filter"]   = glGetSubroutineIndex(program->programId(),GL_FRAGMENT_SHADER,"mode_normal_angle_correction_filter" ) );
+    GLCHK( subroutines["mode_add_noise_filter"]            = glGetSubroutineIndex(program->programId(),GL_FRAGMENT_SHADER,"mode_add_noise_filter" ) );
 
 
 #endif
+
+    GLCHK(glGenVertexArrays(1, &vao));
+    GLCHK(glBindVertexArray(vao));
 
     makeScreenQuad();
 
@@ -303,14 +314,75 @@ void GLImage::initializeGL()
         auxFBO1BMLevels[i] = NULL;
         auxFBO2BMLevels[i] = NULL;
     }
+    paintFBO   = NULL;
+
+    GLCHK(glBindVertexArray(0));
 
     emit readyGL();
 }
 
 void GLImage::paintGL()
 {
-    render();
-    emit rendered();
+    glBindVertexArray(vao);
+
+    // Perform filters on images and render the final result to renderFBO
+    // avoid rendering function if there is rendered something already
+    if(!bSkipProcessing && !bRendering){        
+        bRendering = true;
+        render();
+    }
+
+
+    bSkipProcessing = false;
+    conversionType  = CONVERT_NONE;
+
+    // Draw current FBO using current image after rendering the paintFBO will be replaced
+    if(!bShadowRender){
+
+        //if (!activeImage) return;
+        if (paintFBO != NULL){ // since grunge map can be different we need to calculate ratio each time
+          fboRatio = float(paintFBO->width())/paintFBO->height();
+          orthographicProjHeight = (1+zoom)/windowRatio;
+          orthographicProjWidth  = (1+zoom)/fboRatio;
+        }
+        GLCHK( glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT) );
+        GLCHK( glDisable(GL_CULL_FACE) );
+        GLCHK( glDisable(GL_DEPTH_TEST) );
+        // positions
+        glBindBuffer(GL_ARRAY_BUFFER, vbos[0]);
+        glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(float)*3,(void*)0);
+        // indices
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, vbos[2]);
+
+        QGLFramebufferObject* activeFBO     = paintFBO;
+
+        #ifdef USE_OPENGL_330
+            program = filter_programs["mode_normal_filter"];
+            program->bind();
+        #else
+            GLCHK( glUniformSubroutinesuiv( GL_FRAGMENT_SHADER, 1, &subroutines["mode_normal_filter"]) );
+        #endif
+
+        // Displaying new image
+        activeFBO->bindDefault();
+        program->setUniformValue("quad_draw_mode", 1);
+
+        GLCHK( glViewport(0,0,width()*devicePixelRatio(),height()*devicePixelRatio()) );
+        GLCHK( glActiveTexture(GL_TEXTURE0) );
+        GLCHK( glBindTexture(GL_TEXTURE_2D, activeFBO->texture()) );
+
+        QMatrix4x4 m;
+        m.ortho(0,orthographicProjWidth,0,orthographicProjHeight,-1,1);
+        GLCHK( program->setUniformValue("ProjectionMatrix", m) );
+        m.setToIdentity();
+        m.translate(xTranslation,yTranslation,0);
+        GLCHK( program->setUniformValue("ModelViewMatrix", m) );
+        GLCHK( program->setUniformValue("material_id", int(-1)) );
+        GLCHK( glDrawElements(GL_TRIANGLES, 3*2, GL_UNSIGNED_INT, 0) );
+        GLCHK( program->setUniformValue("quad_draw_mode", int(0)) );
+    }
+
+    glBindVertexArray(0);
 }
 
 
@@ -318,10 +390,11 @@ void GLImage::paintGL()
 void GLImage::render(){
 
     if (!activeImage) return;
+
     if ( activeImage->fbo){ // since grunge map can be different we need to calculate ratio each time
       fboRatio = float(activeImage->fbo->width())/activeImage->fbo->height();
       orthographicProjHeight = (1+zoom)/windowRatio;
-      orthographicProjWidth = (1+zoom)/fboRatio;
+      orthographicProjWidth  = (1+zoom)/fboRatio;
     }
     // do not clear the background during rendering process
     if(!bShadowRender){
@@ -346,7 +419,10 @@ void GLImage::render(){
     bool bTransformUVs = true; // images which depend on others will not be affected by UV changes again
     bool bSkipStandardProcessing = false;
 
+
     if((activeImage->bSkipProcessing) && (activeImage->imageType != MATERIAL_TEXTURE)) bSkipProcessing = true;// do not process images when is disabled
+    if(bToggleColorPicking) bSkipStandardProcessing = true;
+
 
     if(!bSkipProcessing == true){
     // resizing the FBOs in case of convertion procedure
@@ -377,7 +453,6 @@ void GLImage::render(){
     FBOImages::resize(auxFBO2,activeFBO->width(),activeFBO->height());
     FBOImages::resize(auxFBO3,activeFBO->width(),activeFBO->height());
     FBOImages::resize(auxFBO4,activeFBO->width(),activeFBO->height());
-
     // allocate aditional FBOs when conversion from BaseMap is enabled
     if(activeImage->imageType == DIFFUSE_TEXTURE && activeImage->bConversionBaseMap){
         for(int i = 0; i < 3 ; i++){
@@ -426,9 +501,9 @@ void GLImage::render(){
     GLCHK( glBindTexture(GL_TEXTURE_2D, targetImageMaterial->scr_tex_id) );
     GLCHK( glActiveTexture(GL_TEXTURE0) );
 
-
-    copyTex2FBO(activeImage->scr_tex_id,activeImage->fbo);
-
+//    if(int(activeImage->currentMaterialIndeks) < 0){
+        copyTex2FBO(activeImage->scr_tex_id,activeImage->fbo);
+//    }
 
 
     // in some cases the output image will be taken from other sources
@@ -548,8 +623,8 @@ void GLImage::render(){
         if(conversionType == CONVERT_FROM_N_TO_H){
             applyNormalToHeight(activeImage,targetImageNormal->fbo,activeFBO,auxFBO1);
             applyCPUNormalizationFilter(auxFBO1,activeFBO);
-            applyGaussFilter(activeFBO,auxFBO1,auxFBO2,1,0.5); // small blur
-            copyFBO(auxFBO2,activeFBO);
+            applyAddNoiseFilter(activeFBO,auxFBO1);
+            copyFBO(auxFBO1,activeFBO);
 
             targetImageHeight->updateSrcTexId(activeFBO);
             if(!targetImageNormal->bSkipProcessing)  bTransformUVs = false;
@@ -622,7 +697,7 @@ void GLImage::render(){
     };
 
     // apply grunge filter when enabled
-    if(conversionType == CONVERT_NONE && targetImageGrunge->grungeOverallWeight != 0.0 ){
+    if(conversionType == CONVERT_NONE && GrungeProp.OverallWeight != 0.0f ){
         if(activeImage->imageType < MATERIAL_TEXTURE){
 
             copyTex2FBO(targetImageGrunge->fbo->texture(),auxFBO2);
@@ -643,6 +718,7 @@ void GLImage::render(){
     }
 
 
+
     // skip all processing and when mouse is dragged
     if(!bSkipStandardProcessing){
 
@@ -650,6 +726,7 @@ void GLImage::render(){
 
     // begin standart pipe-line (for each image)
     applyInvertComponentsFilter(activeFBO,auxFBO1);
+    copyFBO(auxFBO1,activeFBO);
 
 
 
@@ -659,14 +736,13 @@ void GLImage::render(){
        activeImage->imageType != ROUGHNESS_TEXTURE){
 
         // hue manipulation
-        applyColorHueFilter(auxFBO1,activeFBO);
-        copyFBO(activeFBO,auxFBO1);
+        applyColorHueFilter(activeFBO,auxFBO1);
+        copyFBO(auxFBO1,activeFBO);
     }
 
-    // In case when color picking is enabled disable
-    // gray scale filter
-    if(!activeImage->bRoughnessEnableColorPicking){
-    if(activeImage->bGrayScale ||
+
+
+    if(BasicProp.GrayScale.EnableGrayScale ||
             activeImage->imageType == ROUGHNESS_TEXTURE ||
             activeImage->imageType == OCCLUSION_TEXTURE ||
             activeImage->imageType == HEIGHT_TEXTURE ){
@@ -675,74 +751,18 @@ void GLImage::render(){
         copyFBO(auxFBO1,activeFBO);
     }
 
-    }else copyFBO(auxFBO1,activeFBO);
-
-
-
-
-    // both metallic and roughness are almost the same
-    // so use same filters for them
-    if( (activeImage->imageType == ROUGHNESS_TEXTURE ||  activeImage->imageType == METALLIC_TEXTURE )
-        && activeImage->bRoughnessSurfaceEnable ){
-        // processing surface
-        applyRoughnessFilter(activeFBO,auxFBO2,auxFBO1);
-        copyFBO(auxFBO1,activeFBO);
-    }
-
 
 
     // specular manipulation
-    if(activeImage->bSpeclarControl && activeImage->imageType != HEIGHT_TEXTURE){
+    if(SurfaceDetailsProp.EnableSurfaceDetails && activeImage->imageType != HEIGHT_TEXTURE){
         applyDGaussiansFilter(activeFBO,auxFBO2,auxFBO1);
-        //copyFBO(activeFBO,auxFBO1);
+        //copyFBO(auxFBO1,activeFBO);
         applyContrastFilter(auxFBO1,activeFBO);
     }
 
 
-
-    // -------------------------------------------------------- //
-    // selective blur of height image
-    // -------------------------------------------------------- //
-    if(activeImage->bSelectiveBlurEnable){
-        // mask input image
-        switch(activeImage->selectiveBlurMaskInputImageType){
-            case(INPUT_FROM_HEIGHT_OUTPUT):
-                copyFBO(activeFBO,auxFBO3);
-                break;
-            case(INPUT_FROM_DIFFUSE_OUTPUT):
-                copyFBO(targetImageDiffuse->fbo,auxFBO3);
-                break;
-            case(INPUT_FROM_ROUGHNESS_OUTPUT):
-                copyFBO(targetImageRoughness->fbo,auxFBO3);
-                break;
-            case(INPUT_FROM_METALLIC_OUTPUT):
-                copyFBO(targetImageMetallic->fbo,auxFBO3);
-                break;
-            default:
-            break;
-        }
-        // apply filter for mask
-        switch(activeImage->selectiveBlurType){
-        case(SELECTIVE_BLUR_DIFFERENCE_OF_GAUSSIANS):
-            applyDGaussiansFilter(auxFBO3,auxFBO2,auxFBO1,true);
-            applyContrastFilter(auxFBO1,auxFBO4,true);
-            break;
-        case(SELECTIVE_BLUR_LEVELS):
-            applyHeightProcessingFilter(auxFBO3,auxFBO4,true);
-            break;
-        };
-
-        // blur image according to mask: tauxFBO4
-        applyMaskedGaussFilter(activeFBO,auxFBO4,auxFBO3,auxFBO2,auxFBO1);
-        copyFBO(auxFBO1,activeFBO);
-
-    } // end of selective blur
-
-
-
-
     // Removing shading...
-    if(activeImage->bRemoveShading){
+    if(activeImage->properties->EnableRemoveShading){
 
 
         applyRemoveLowFreqFilter(activeFBO,auxFBO1,auxFBO2);
@@ -759,8 +779,6 @@ void GLImage::render(){
                                 targetImageOcclusion->fbo,
                                 activeFBO,
                                 auxFBO1);
-
-
         copyFBO(auxFBO1,activeFBO);
     }
 
@@ -768,26 +786,26 @@ void GLImage::render(){
 
 
 
-    if(activeImage->noBlurPasses > 0){
-        for(int i = 0 ; i < activeImage->noBlurPasses ; i++ ){
+    if(BasicProp.EnhanceDetails > 0){
+        for(int i = 0 ; i < BasicProp.EnhanceDetails ; i++ ){
             applyGaussFilter(activeFBO,auxFBO2,auxFBO1,1);
             applyOverlayFilter(activeFBO,auxFBO1,auxFBO2);
             copyFBO(auxFBO2,activeFBO);
         }
     }
 
-    if( activeImage->smallDetails  > 0.0){
+    if(BasicProp.SmallDetails  > 0.0f){
         applySmallDetailsFilter(activeFBO,auxFBO2,auxFBO1);
         copyFBO(auxFBO1,activeFBO);
     }
 
 
-    if( activeImage->mediumDetails > 0.0){
+    if(BasicProp.MediumDetails > 0.0f){
         applyMediumDetailsFilter(activeFBO,auxFBO2,auxFBO1);
         copyFBO(auxFBO1,activeFBO);
     }
 
-    if(activeImage->sharpenBlurAmount != 0){
+    if(BasicProp.SharpenBlur != 0){
         applySharpenBlurFilter(activeFBO,auxFBO2,auxFBO1);
         copyFBO(auxFBO1,activeFBO);
     }
@@ -801,10 +819,22 @@ void GLImage::render(){
     // -------------------------------------------------------- //
     // roughness color mapping
     // -------------------------------------------------------- //
+
+    // both metallic and roughness are almost the same
+    // so use same filters for them
+    if( (activeImage->imageType == ROUGHNESS_TEXTURE ||
+         activeImage->imageType == METALLIC_TEXTURE )
+        && RMFilterProp.Filter == COLOR_FILTER::Noise ){
+        // processing surface
+        applyRoughnessFilter(activeFBO,auxFBO2,auxFBO1);
+        copyFBO(auxFBO1,activeFBO);
+    }
+
+
     if(activeImage->imageType == ROUGHNESS_TEXTURE ||
        activeImage->imageType == METALLIC_TEXTURE){
-        if(activeImage->bRoughnessEnableColorPicking && !activeImage->bRoughnessColorPickingToggled){
-            applyRoughnessColorFilter(activeFBO,auxFBO1);
+        if(RMFilterProp.Filter == COLOR_FILTER::Color){
+            applyRoughnessColorFilter(activeFBO,auxFBO1);            
             copyFBO(auxFBO1,activeFBO);
         }
     }
@@ -820,7 +850,7 @@ void GLImage::render(){
         applyNormalsStepFilter(activeFBO,auxFBO1);
 
         // apply normal mixer filter
-        if(activeImage->bNormalMixerEnabled && activeImage->normalMixerInputTexId != 0){
+        if(NormalMixerProp.EnableMixer && activeImage->normalMixerInputTexId != 0){
             applyNormalMixerFilter(auxFBO1,activeFBO);
         }else{// otherwise skip
             copyFBO(auxFBO1,activeFBO);
@@ -830,13 +860,23 @@ void GLImage::render(){
     // -------------------------------------------------------- //
     // diffuse processing pipeline
     // -------------------------------------------------------- //
-    if(activeImage->imageType == DIFFUSE_TEXTURE && activeImage->bConversionBaseMap){
+
+    if(!bToggleColorPicking) // skip this step if the Color picking is enabled
+    if(activeImage->imageType == DIFFUSE_TEXTURE &&
+            (activeImage->bConversionBaseMap || conversionType == CONVERT_FROM_D_TO_O )){
 
         // create mipmaps
         copyTex2FBO(activeFBO->texture(),auxFBO0BMLevels[0]);
         copyTex2FBO(activeFBO->texture(),auxFBO0BMLevels[1]);
         copyTex2FBO(activeFBO->texture(),auxFBO0BMLevels[2]);
         // calculate normal for orginal image
+
+
+        activeImage->baseMapConvLevels[0].fromProperty(BaseMapToOthersProp.LevelSmall);
+        activeImage->baseMapConvLevels[1].fromProperty(BaseMapToOthersProp.LevelMedium);
+        activeImage->baseMapConvLevels[2].fromProperty(BaseMapToOthersProp.LevelBig);
+        activeImage->baseMapConvLevels[3].fromProperty(BaseMapToOthersProp.LevelHuge);
+
         applyBaseMapConversion(activeFBO,auxFBO2,auxFBO1,activeImage->baseMapConvLevels[0]);
 
         // calulcate normal for mipmaps
@@ -858,14 +898,15 @@ void GLImage::render(){
         if(conversionType == CONVERT_FROM_D_TO_O){
             applyNormalToHeight(targetImageHeight,activeFBO,auxFBO1,auxFBO2);
             applyCPUNormalizationFilter(auxFBO2,auxFBO1);
+            applyAddNoiseFilter(auxFBO1,auxFBO2);
+            copyFBO(auxFBO2,auxFBO1);
+
         }else if(activeImage->bConversionBaseMapShowHeightTexture){
             applyNormalToHeight(targetImageHeight,activeFBO,auxFBO1,auxFBO2);
             applyCPUNormalizationFilter(auxFBO2,activeFBO);
         }
     } // end of base map conversion
-
     }// end of skip standard processing
-
 
 
     // copying the conversion results to proper textures
@@ -907,8 +948,6 @@ void GLImage::render(){
             copyTex2FBO(activeImage->scr_tex_id,targetImageMetallic->fbo);
             targetImageMetallic->updateSrcTexId(targetImageMetallic->fbo);
 
-
-
         break;
         case(CONVERT_FROM_HN_TO_OC):
             //copyFBO(activeFBO,targetImageOcclusion->ref_fbo);
@@ -922,61 +961,33 @@ void GLImage::render(){
     }
 
 
-
     activeFBO = activeImage->fbo;
-
-
 
     }// end of skip processing
 
 
 
-
-    if(!bShadowRender){
-
-        #ifdef USE_OPENGL_330
-            program = filter_programs["mode_normal_filter"];
-            program->bind();
-        #else
-            GLCHK( glUniformSubroutinesuiv( GL_FRAGMENT_SHADER, 1, &subroutines["mode_normal_filter"]) );
-        #endif
-
-        // Displaying new image
-        activeFBO->bindDefault();
-        program->setUniformValue("quad_draw_mode", 1);
-
-        GLCHK( glViewport(0,0,width(),height()) );
-        GLCHK( glActiveTexture(GL_TEXTURE0) );
-        GLCHK( glBindTexture(GL_TEXTURE_2D, activeFBO->texture()) );
-
-        QMatrix4x4 m;        
-        m.ortho(0,orthographicProjWidth,0,orthographicProjHeight,-1,1);
-        GLCHK( program->setUniformValue("ProjectionMatrix", m) );
-        m.setToIdentity();
-        m.translate(xTranslation,yTranslation,0);
-        GLCHK( program->setUniformValue("ModelViewMatrix", m) );
-        GLCHK( program->setUniformValue("material_id", int(-1)) );       
-        GLCHK( glDrawElements(GL_TRIANGLES, 3*2, GL_UNSIGNED_INT, 0) );
-        GLCHK( program->setUniformValue("quad_draw_mode", int(0)) );
-
-        
-    }
     bSkipProcessing = false;
     conversionType  = CONVERT_NONE;
 
+    if(!bShadowRender){
+        GLCHK(FBOImages::resize(renderFBO,activeFBO->width(),activeFBO->height()));
+        GLCHK( program->setUniformValue("material_id", int(-1)) );
+        GLCHK(applyNormalFilter(activeFBO,renderFBO));
+    }
+    emit rendered();
 }
 
 void GLImage::showEvent(QShowEvent* event){
     QWidget::showEvent( event );
     resetView();
 }
-void GLImage::resizeFBO(int width, int height){
 
+
+void GLImage::resizeFBO(int width, int height){
      conversionType = CONVERT_RESIZE;
      resize_width   = width;
      resize_height  = height;
-     //updateGL();
-     //conversionType = CONVERT_NONE;
 }
 
 void GLImage::resetView(){
@@ -1031,7 +1042,7 @@ void GLImage::resizeGL(int width, int height)
 
 
 void GLImage::setActiveImage(FBOImageProporties* ptr){
-        activeImage = ptr;
+        activeImage = ptr;        
         updateGLNow();
 }
 void GLImage::enableShadowRender(bool enable){
@@ -1079,6 +1090,10 @@ void GLImage::selectSeamlessMode(SeamlessMode mode){
     updateGL();
 }
 
+void GLImage::imageChanged(){
+    bToggleColorPicking = false; // restore picking state when another property was changed
+}
+
 
 void GLImage::applyNormalFilter(QGLFramebufferObject* inputFBO,
                          QGLFramebufferObject* outputFBO){
@@ -1121,23 +1136,7 @@ void GLImage::applyHeightToNormal(QGLFramebufferObject* inputFBO,
     GLCHK( outputFBO->bindDefault() );
 }
 
-/*
-void GLImage::applyNormalFilter(QGLFramebufferObject* inputFBO){
 
-    GLCHK( program->bind() );
-    GLCHK( program->setUniformValue("gui_image_type", activeImage->imageType) );
-    GLCHK( glViewport(0,0,inputFBO->width(),inputFBO->height()) );
-    GLCHK( glUniformSubroutinesuiv( GL_FRAGMENT_SHADER, 1, &subroutines["mode_normal_filter"]) );
-    GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
-    GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
-//    GLCHK( program->setUniformValue("gui_clear_alpha"  , (int)0) );
-
-    GLCHK( glBindTexture(GL_TEXTURE_2D, inputFBO->texture()) );
-    GLCHK( glDrawElements(GL_TRIANGLES, 3*2, GL_UNSIGNED_INT, 0) );
-    GLCHK( program->release() );
-
-}
-*/
 void GLImage::applyColorHueFilter(  QGLFramebufferObject* inputFBO,
                            QGLFramebufferObject* outputFBO){
 
@@ -1152,8 +1151,9 @@ void GLImage::applyColorHueFilter(  QGLFramebufferObject* inputFBO,
 #endif
 
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
-    GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
-    GLCHK( program->setUniformValue("gui_hue"   , float(activeImage->colorHue)) );
+    GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );   
+    GLCHK( program->setUniformValue("gui_hue"   , float(activeImage->properties->Basic.ColorHue)) );
+
 
     GLCHK( glBindTexture(GL_TEXTURE_2D, inputFBO->texture()) );
     GLCHK( glDrawElements(GL_TRIANGLES, 3*2, GL_UNSIGNED_INT, 0) );
@@ -1207,12 +1207,7 @@ void GLImage::applyPerspectiveTransformFilter(  QGLFramebufferObject* inputFBO,
     GLCHK( glDrawElements(GL_TRIANGLES, 3*2, GL_UNSIGNED_INT, 0) );
     GLCHK( glActiveTexture(GL_TEXTURE0) );
     inputFBO->bindDefault();
-
-
 }
-
-
-
 
 
 void GLImage::applyGaussFilter(QGLFramebufferObject* sourceFBO,
@@ -1247,60 +1242,6 @@ void GLImage::applyGaussFilter(QGLFramebufferObject* sourceFBO,
     GLCHK( glBindTexture(GL_TEXTURE_2D, auxFBO->texture()) );
     GLCHK( glDrawElements(GL_TRIANGLES, 3*2, GL_UNSIGNED_INT, 0) );
     GLCHK( program->setUniformValue("gauss_mode",0) );
-}
-
-void GLImage::applyMaskedGaussFilter(
-                            QGLFramebufferObject* sourceFBO,
-                            QGLFramebufferObject* maskFBO,
-                            QGLFramebufferObject *auxFBO,
-                            QGLFramebufferObject *aux2FBO,
-                            QGLFramebufferObject* outputFBO){
-
-
-    // blur orginal image
-    applyGaussFilter(sourceFBO,outputFBO,auxFBO,int(activeImage->selectiveBlurMaskRadius));
-
-    for(int iters = 0 ; iters < activeImage->selectiveBlurNoIters - 1 ; iters ++ ){
-        applyGaussFilter(auxFBO,aux2FBO,outputFBO,int(activeImage->selectiveBlurMaskRadius));
-        applyGaussFilter(outputFBO,aux2FBO,auxFBO,int(activeImage->selectiveBlurMaskRadius));
-    }
-#ifdef USE_OPENGL_330
-    program = filter_programs["mode_gauss_filter"];
-    program->bind();
-    updateProgramUniforms(0);
-#else
-    GLCHK( glUniformSubroutinesuiv( GL_FRAGMENT_SHADER, 1, &subroutines["mode_gauss_filter"]) );
-#endif
-
-
-    GLCHK( program->setUniformValue("gui_gauss_radius"   ,int  (activeImage->selectiveBlurMaskRadius)) );
-    GLCHK( program->setUniformValue("gui_gauss_w"        ,float(activeImage->selectiveBlurMaskRadius)) );
-    GLCHK( program->setUniformValue("gui_gauss_mask"  , 1) );
-    GLCHK( program->setUniformValue("gui_gauss_show_mask",bool (activeImage->bSelectiveBlurPreviewMask) ) );
-    GLCHK( program->setUniformValue("gui_gauss_blending",(activeImage->selectiveBlurBlending) ) );
-    GLCHK( program->setUniformValue("gui_gauss_invert_mask",bool (activeImage->bSelectiveBlurInvertMask) ) );
-
-
-
-    GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
-    GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
-
-    GLCHK( glViewport(0,0,sourceFBO->width(),sourceFBO->height()) );
-
-    GLCHK( outputFBO->bind() );
-    GLCHK( glActiveTexture(GL_TEXTURE0) );
-    GLCHK( glBindTexture(GL_TEXTURE_2D, sourceFBO->texture()) );
-    GLCHK( glActiveTexture(GL_TEXTURE1) );
-    GLCHK( glBindTexture(GL_TEXTURE_2D, maskFBO->texture()) );
-    GLCHK( glActiveTexture(GL_TEXTURE2) );
-    GLCHK( glBindTexture(GL_TEXTURE_2D, auxFBO->texture()) );
-    GLCHK( glDrawElements(GL_TRIANGLES, 3*2, GL_UNSIGNED_INT, 0) );
-
-    GLCHK( glActiveTexture(GL_TEXTURE0) );
-    GLCHK( program->setUniformValue("gauss_mode",0) );
-    GLCHK( program->setUniformValue("gui_gauss_mask"  , 0) );
-    GLCHK( program->setUniformValue("gui_gauss_show_mask" , false ) );
-    GLCHK( outputFBO->bindDefault() );
 }
 
 
@@ -1341,8 +1282,8 @@ void GLImage::applyRemoveShadingFilter(QGLFramebufferObject* inputFBO,
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
 
-    GLCHK( program->setUniformValue("gui_remove_shading",activeImage->noRemoveShadingGaussIter));
-    GLCHK( program->setUniformValue("gui_ao_cancellation",activeImage->aoCancellation ));
+    GLCHK( program->setUniformValue("gui_remove_shading",RemoveShadingProp.RemoveShadingByGaussian));
+    GLCHK( program->setUniformValue("gui_ao_cancellation",RemoveShadingProp.AOCancellation ));
 
     GLCHK( glViewport(0,0,inputFBO->width(),inputFBO->height()) );
     GLCHK( outputFBO->bind() );
@@ -1361,10 +1302,7 @@ void GLImage::applyRemoveLowFreqFilter(QGLFramebufferObject* inputFBO,
                                        QGLFramebufferObject* auxFBO,
                                        QGLFramebufferObject* outputFBO){
 
-
-
-
-    applyGaussFilter(inputFBO,samplerFBO1,samplerFBO2,activeImage->removeShadingLFRadius*2);
+    applyGaussFilter(inputFBO,samplerFBO1,samplerFBO2,RemoveShadingProp.LowFrequencyFilterRadius*50);
 
     // calculating the average color on CPU
     applyNormalFilter(inputFBO,averageColorFBO); // copy large file to smaller FBO (save time!)
@@ -1393,9 +1331,6 @@ void GLImage::applyRemoveLowFreqFilter(QGLFramebufferObject* inputFBO,
     ave_color[0] /= (textureWidth*textureHeight);
     ave_color[1] /= (textureWidth*textureHeight);
     ave_color[2] /= (textureWidth*textureHeight);
-
-    //qDebug() << "Average Color:";
-    //qDebug() << "Color = (" << ave_color[0] << "," << ave_color[1] << "," << ave_color[2] << ")"  ;
     delete[] img;
 
     QVector3D aveColor = QVector3D(ave_color[0],ave_color[1],ave_color[2]);
@@ -1411,7 +1346,7 @@ void GLImage::applyRemoveLowFreqFilter(QGLFramebufferObject* inputFBO,
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
     GLCHK( program->setUniformValue("average_color"  , aveColor ) );
-    GLCHK( program->setUniformValue("gui_remove_shading_lf_blending"  , activeImage->removeShadingLFBlending ) );
+    GLCHK( program->setUniformValue("gui_remove_shading_lf_blending"  , RemoveShadingProp.LowFrequencyFilterBlending ) );
 
     GLCHK( outputFBO->bind() );
     GLCHK( glViewport(0,0,outputFBO->width(),outputFBO->height()) );
@@ -1452,7 +1387,6 @@ void GLImage::applyOverlayFilter(QGLFramebufferObject* layerAFBO,
     GLCHK( glActiveTexture(GL_TEXTURE0) );
 
     outputFBO->bindDefault();
-
 }
 
 
@@ -1460,15 +1394,11 @@ void GLImage::applyOverlayFilter(QGLFramebufferObject* layerAFBO,
 void GLImage::applySeamlessLinearFilter(QGLFramebufferObject* inputFBO,
                                        QGLFramebufferObject* outputFBO){
 
-
     // when materials texture is enabled UV transformation are disabled
     if(FBOImageProporties::currentMaterialIndeks != MATERIALS_DISABLED){
         copyFBO(inputFBO,outputFBO);
         return;
     }
-
-
-
     switch(FBOImageProporties::seamlessContrastInputType){
         default:
         case(INPUT_FROM_HEIGHT_INPUT):
@@ -1504,9 +1434,6 @@ void GLImage::applySeamlessLinearFilter(QGLFramebufferObject* inputFBO,
     GLCHK( program->setUniformValue("make_seamless_radius"           , FBOImageProporties::seamlessSimpleModeRadius) );
     GLCHK( program->setUniformValue("gui_seamless_contrast_strenght" , FBOImageProporties::seamlessContrastStrenght) );
     GLCHK( program->setUniformValue("gui_seamless_contrast_power"    , FBOImageProporties::seamlessContrastPower) );
-
-
-
 
 
     GLCHK( glViewport(0,0,inputFBO->width(),inputFBO->height()) );
@@ -1556,17 +1483,11 @@ void GLImage::applySeamlessLinearFilter(QGLFramebufferObject* inputFBO,
 void GLImage::applySeamlessFilter(QGLFramebufferObject* inputFBO,
                                   QGLFramebufferObject* outputFBO){
 
-
-
-
     // when materials texture is enabled UV transformation are disabled
     if(FBOImageProporties::currentMaterialIndeks != MATERIALS_DISABLED){
         copyFBO(inputFBO,outputFBO);
         return;
     }
-
-
-
     switch(FBOImageProporties::seamlessContrastInputType){
         default:
         case(INPUT_FROM_HEIGHT_INPUT):            
@@ -1626,9 +1547,8 @@ void GLImage::applySeamlessFilter(QGLFramebufferObject* inputFBO,
 
 
 void GLImage::applyDGaussiansFilter(QGLFramebufferObject* inputFBO,
-                                  QGLFramebufferObject* auxFBO,
-                                  QGLFramebufferObject* outputFBO,
-                                    bool bUseSelectiveBlur){
+                                    QGLFramebufferObject* auxFBO,
+                                    QGLFramebufferObject* outputFBO){
 
 
 #ifdef USE_OPENGL_330
@@ -1639,13 +1559,9 @@ void GLImage::applyDGaussiansFilter(QGLFramebufferObject* inputFBO,
     GLCHK( glUniformSubroutinesuiv( GL_FRAGMENT_SHADER, 1, &subroutines["mode_gauss_filter"]) );
 #endif
 
-    if(bUseSelectiveBlur){
-        GLCHK( program->setUniformValue("gui_gauss_radius", int(activeImage->selectiveBlurDOGRadius)) );
-        GLCHK( program->setUniformValue("gui_gauss_w", float(0.1)) );
-    }else{
-        GLCHK( program->setUniformValue("gui_gauss_radius", int(activeImage->specularRadius)) );
-        GLCHK( program->setUniformValue("gui_gauss_w", activeImage->specularW1) );
-    }
+    GLCHK( program->setUniformValue("gui_gauss_radius", int(SurfaceDetailsProp.Radius)) );
+    GLCHK( program->setUniformValue("gui_gauss_w", SurfaceDetailsProp.WeightA) );
+
 
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
@@ -1665,11 +1581,8 @@ void GLImage::applyDGaussiansFilter(QGLFramebufferObject* inputFBO,
     GLCHK( glBindTexture(GL_TEXTURE_2D, auxFBO->texture()) );
     GLCHK( glDrawElements(GL_TRIANGLES, 3*2, GL_UNSIGNED_INT, 0) );
 
-    if(bUseSelectiveBlur){
-        GLCHK( program->setUniformValue("gui_gauss_w", float(activeImage->selectiveBlurDOGRadius)) );
-    }else{
-        GLCHK( program->setUniformValue("gui_gauss_w", activeImage->specularW2) );
-    }
+    GLCHK( program->setUniformValue("gui_gauss_w", SurfaceDetailsProp.WeightB) );
+
 
     GLCHK( auxFBO->bind() );
     GLCHK( glActiveTexture(GL_TEXTURE0) );
@@ -1690,16 +1603,8 @@ void GLImage::applyDGaussiansFilter(QGLFramebufferObject* inputFBO,
     GLCHK( glUniformSubroutinesuiv( GL_FRAGMENT_SHADER, 1, &subroutines["mode_dgaussians_filter"]) );
 #endif
 
-
-
     GLCHK( program->setUniformValue("gui_mode_dgaussian", 1) );
-
-    if(bUseSelectiveBlur){
-        GLCHK( program->setUniformValue("gui_specular_amplifier", activeImage->selectiveBlurDOGAmplifier) );
-    }else{
-        GLCHK( program->setUniformValue("gui_specular_amplifier", activeImage->specularAmplifier) );
-    }
-
+    GLCHK( program->setUniformValue("gui_specular_amplifier", SurfaceDetailsProp.Amplifier) );
 
     GLCHK( auxFBO->bind() );
     GLCHK( glActiveTexture(GL_TEXTURE0) );
@@ -1716,7 +1621,7 @@ void GLImage::applyDGaussiansFilter(QGLFramebufferObject* inputFBO,
 }
 
 void GLImage::applyContrastFilter(QGLFramebufferObject* inputFBO,
-                                  QGLFramebufferObject* outputFBO, bool bUseSelectiveBlur){
+                                  QGLFramebufferObject* outputFBO){
 
 
 #ifdef USE_OPENGL_330
@@ -1729,13 +1634,10 @@ void GLImage::applyContrastFilter(QGLFramebufferObject* inputFBO,
 
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
-        if(bUseSelectiveBlur){
-        GLCHK( program->setUniformValue("gui_specular_contrast"  , activeImage->selectiveBlurDOGConstrast) );
-        GLCHK( program->setUniformValue("gui_specular_brightness", activeImage->selectiveBlurDOGOffset) );
-    }else{
-        GLCHK( program->setUniformValue("gui_specular_contrast", activeImage->specularContrast) );
-        GLCHK( program->setUniformValue("gui_specular_brightness", activeImage->specularBrightness) );
-    }
+
+    GLCHK( program->setUniformValue("gui_specular_contrast", SurfaceDetailsProp.Contrast) );
+    GLCHK( program->setUniformValue("gui_specular_brightness", 0.0f) );//not used since offset does the same
+
     
     GLCHK( glViewport(0,0,inputFBO->width(),inputFBO->height()) );
     GLCHK( outputFBO->bind() );
@@ -1757,7 +1659,7 @@ void GLImage::applySmallDetailsFilter(QGLFramebufferObject* inputFBO,
 #endif
 
 
-    GLCHK( program->setUniformValue("gui_depth", activeImage->detailDepth) );
+    GLCHK( program->setUniformValue("gui_depth", BasicProp.DetailDepth) );
     GLCHK( program->setUniformValue("gui_gauss_radius", int(3.0)) );
     GLCHK( program->setUniformValue("gui_gauss_w", float(3.0)) );
 
@@ -1809,7 +1711,7 @@ void GLImage::applySmallDetailsFilter(QGLFramebufferObject* inputFBO,
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
 
-    GLCHK( program->setUniformValue("gui_small_details", activeImage->smallDetails) );
+    GLCHK( program->setUniformValue("gui_small_details", BasicProp.SmallDetails) );
     GLCHK( glViewport(0,0,inputFBO->width(),inputFBO->height()) );
     GLCHK( outputFBO->bind() );
     GLCHK( glActiveTexture(GL_TEXTURE0) );
@@ -1836,7 +1738,7 @@ void GLImage::applyMediumDetailsFilter(QGLFramebufferObject* inputFBO,
     GLCHK( glUniformSubroutinesuiv( GL_FRAGMENT_SHADER, 1, &subroutines["mode_gauss_filter"]) );
 #endif
 
-    GLCHK( program->setUniformValue("gui_depth", activeImage->detailDepth) );
+    GLCHK( program->setUniformValue("gui_depth", BasicProp.DetailDepth) );
     GLCHK( program->setUniformValue("gui_gauss_radius", int(15.0)) );
     GLCHK( program->setUniformValue("gui_gauss_w", float(15.0)) );
 
@@ -1872,7 +1774,7 @@ void GLImage::applyMediumDetailsFilter(QGLFramebufferObject* inputFBO,
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
 
-    program->setUniformValue("gui_small_details", activeImage->mediumDetails);
+    program->setUniformValue("gui_small_details", BasicProp.MediumDetails);
     glViewport(0,0,inputFBO->width(),inputFBO->height());
     GLCHK( auxFBO->bind() );
     GLCHK( glActiveTexture(GL_TEXTURE0) );
@@ -1901,10 +1803,37 @@ void GLImage::applyGrayScaleFilter(QGLFramebufferObject* inputFBO,
     GLCHK( glUniformSubroutinesuiv( GL_FRAGMENT_SHADER, 1, &subroutines["mode_gray_scale_filter"]) );
 #endif
 
+    // There is a change if gray scale filter is used for convertion from diffuse
+    // texture to others in any other case this filter works just a simple gray scale filter.
+    // Check if the baseMapToOthers is enabled, if yes check is min and max values are defined.
+
+    GLCHK( program->setUniformValue("gui_gray_scale_max_color_defined",false) );
+    GLCHK( program->setUniformValue("gui_gray_scale_min_color_defined",false) );
+
+    if(activeImage->bConversionBaseMap){
+        if(QColor(BaseMapToOthersProp.MaxColor.value()).red() >= 0){
+
+            QColor color = QColor(BaseMapToOthersProp.MaxColor.value());
+            QVector3D dcolor(color.redF(),color.greenF(),color.blueF());
+            GLCHK( program->setUniformValue("gui_gray_scale_max_color_defined",true) );
+            GLCHK( program->setUniformValue("gui_gray_scale_max_color",dcolor) );
+        }
+        if(QColor(BaseMapToOthersProp.MinColor.value()).red() >= 0){
+            QColor color = QColor(BaseMapToOthersProp.MinColor.value());
+            QVector3D dcolor(color.redF(),color.greenF(),color.blueF());
+            GLCHK( program->setUniformValue("gui_gray_scale_min_color_defined",true) );
+            GLCHK( program->setUniformValue("gui_gray_scale_min_color",dcolor) );
+        }
+        GLCHK( program->setUniformValue("gui_gray_scale_range_tol",float(BaseMapToOthersProp.ColorBalance*10)) );
+    }
 
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
-    GLCHK( program->setUniformValue("gui_gray_scale_preset",activeImage->grayScalePreset.toQVector3D()) );
+
+    GLCHK( program->setUniformValue("gui_gray_scale_preset",QVector3D(BasicProp.GrayScale.GrayScaleR,
+                                                                      BasicProp.GrayScale.GrayScaleG,
+                                                                      BasicProp.GrayScale.GrayScaleB)) );
+
     GLCHK( glViewport(0,0,inputFBO->width(),inputFBO->height()) );
     GLCHK( outputFBO->bind() );
     GLCHK( glBindTexture(GL_TEXTURE_2D, inputFBO->texture()) );
@@ -1927,7 +1856,9 @@ void GLImage::applyInvertComponentsFilter(QGLFramebufferObject* inputFBO,
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
 
-    GLCHK( program->setUniformValue("gui_inverted_components"  , QVector3D(activeImage->bInvertR,activeImage->bInvertG,activeImage->bInvertB)) );
+    GLCHK( program->setUniformValue("gui_inverted_components"  , QVector3D(BasicProp.ColorComponents.InvertRed,
+                                                                           BasicProp.ColorComponents.InvertGreen,
+                                                                           BasicProp.ColorComponents.InvertBlue)) );
 
     GLCHK( glViewport(0,0,inputFBO->width(),inputFBO->height()) );
     GLCHK( outputFBO->bind() );
@@ -1952,7 +1883,7 @@ void GLImage::applySharpenBlurFilter(QGLFramebufferObject* inputFBO,
 
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
-    GLCHK( program->setUniformValue("gui_sharpen_blur", activeImage->sharpenBlurAmount) );
+    GLCHK( program->setUniformValue("gui_sharpen_blur", BasicProp.SharpenBlur) );
 
     GLCHK( glViewport(0,0,inputFBO->width(),inputFBO->height()) );
 
@@ -1983,7 +1914,7 @@ void GLImage::applyNormalsStepFilter(QGLFramebufferObject* inputFBO,
 
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
-    GLCHK( program->setUniformValue("gui_normals_step", activeImage->normalsStep) );
+    GLCHK( program->setUniformValue("gui_normals_step", BasicProp.NormalsStep) );
 
     GLCHK( glViewport(0,0,inputFBO->width(),inputFBO->height()) );
     GLCHK( outputFBO->bind() );
@@ -2007,11 +1938,11 @@ void GLImage::applyNormalMixerFilter(QGLFramebufferObject* inputFBO,
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
 
-    GLCHK( program->setUniformValue("gui_normal_mixer_depth", activeImage->normalMixerDepth) );
-    GLCHK( program->setUniformValue("gui_normal_mixer_angle", activeImage->normalMixerAngle) );
-    GLCHK( program->setUniformValue("gui_normal_mixer_scale", activeImage->normalMixerScale) );
-    GLCHK( program->setUniformValue("gui_normal_mixer_pos_x", activeImage->normalMixerPosX) );
-    GLCHK( program->setUniformValue("gui_normal_mixer_pos_y", activeImage->normalMixerPosY) );
+    GLCHK( program->setUniformValue("gui_normal_mixer_depth",NormalMixerProp.Depth*2 ) );
+    GLCHK( program->setUniformValue("gui_normal_mixer_angle",NormalMixerProp.Angle/180.0f*3.1415926f) );
+    GLCHK( program->setUniformValue("gui_normal_mixer_scale",NormalMixerProp.Scale) );
+    GLCHK( program->setUniformValue("gui_normal_mixer_pos_x",NormalMixerProp.PosX) );
+    GLCHK( program->setUniformValue("gui_normal_mixer_pos_y",NormalMixerProp.PosY) );
 
     GLCHK( glViewport(0,0,inputFBO->width(),inputFBO->height()) );
     GLCHK( outputFBO->bind() );
@@ -2122,9 +2053,21 @@ void GLImage::applyNormalToHeight(FBOImageProporties* image,QGLFramebufferObject
     GLCHK( glBindTexture(GL_TEXTURE_2D, heightFBO->texture()) );
     GLCHK( glActiveTexture(GL_TEXTURE1) );
     GLCHK( glBindTexture(GL_TEXTURE_2D, normalFBO->texture()) );
+
+    // When conversion is enabled (diffuse image only) then
+    // this texture (auxFBO4) keeps the orginal diffuse image
+    // before the gray scale filter applied, this is then
+    // used to force propper height levels in the bump map
+    // since user wants to have defined min/max colors to be 0 or 1
+    // in the height map. In case of other conversion this is no more used.
+    if(activeImage->bConversionBaseMap){
+        GLCHK( glActiveTexture(GL_TEXTURE2) );
+        GLCHK( glBindTexture(GL_TEXTURE_2D, auxFBO4->texture()) );
+    }
+
     GLCHK( glDrawElements(GL_TRIANGLES, 3*2, GL_UNSIGNED_INT, 0) );
 
-    for(int i = 0; i < image->conversionNHItersHuge ; i++){
+    for(int i = 0; i < image->properties->NormalHeightConv.Huge ; i++){
         GLCHK( program->setUniformValue("hn_min_max_scale",QVector3D(-0.0,1.0,pow(2.0,5))) );
         GLCHK( heightFBO->bind() );
         GLCHK( glActiveTexture(GL_TEXTURE0) );
@@ -2136,7 +2079,8 @@ void GLImage::applyNormalToHeight(FBOImageProporties* image,QGLFramebufferObject
         GLCHK( glBindTexture(GL_TEXTURE_2D, heightFBO->texture()) );
         GLCHK( glDrawElements(GL_TRIANGLES, 3*2, GL_UNSIGNED_INT, 0) );
     }
-    for(int i = 0; i < image->conversionNHItersVeryLarge ; i++){
+
+    for(int i = 0; i < image->properties->NormalHeightConv.VeryLarge ; i++){
         GLCHK( program->setUniformValue("hn_min_max_scale",QVector3D(-0.0,1.0,pow(2.0,4))) );
         GLCHK( heightFBO->bind() );
         GLCHK( glActiveTexture(GL_TEXTURE0) );
@@ -2148,7 +2092,8 @@ void GLImage::applyNormalToHeight(FBOImageProporties* image,QGLFramebufferObject
         GLCHK( glBindTexture(GL_TEXTURE_2D, heightFBO->texture()) );
         GLCHK( glDrawElements(GL_TRIANGLES, 3*2, GL_UNSIGNED_INT, 0) );
     }
-    for(int i = 0; i < image->conversionNHItersLarge ; i++){
+
+    for(int i = 0; i < image->properties->NormalHeightConv.Large ; i++){
         GLCHK( program->setUniformValue("hn_min_max_scale",QVector3D(-0.0,1.0,pow(2.0,3))) );
         GLCHK( heightFBO->bind() );
         GLCHK( glActiveTexture(GL_TEXTURE0) );
@@ -2159,8 +2104,10 @@ void GLImage::applyNormalToHeight(FBOImageProporties* image,QGLFramebufferObject
         GLCHK( glActiveTexture(GL_TEXTURE0) );
         GLCHK( glBindTexture(GL_TEXTURE_2D, heightFBO->texture()) );
         GLCHK( glDrawElements(GL_TRIANGLES, 3*2, GL_UNSIGNED_INT, 0) );
+
     }
-    for(int i = 0; i < image->conversionNHItersMedium; i++){
+
+    for(int i = 0; i < image->properties->NormalHeightConv.Medium; i++){
         GLCHK( program->setUniformValue("hn_min_max_scale",QVector3D(-0.0,1.0,pow(2.0,2))) );
         GLCHK( heightFBO->bind() );
         GLCHK( glActiveTexture(GL_TEXTURE0) );
@@ -2172,7 +2119,7 @@ void GLImage::applyNormalToHeight(FBOImageProporties* image,QGLFramebufferObject
         GLCHK( glBindTexture(GL_TEXTURE_2D, heightFBO->texture()) );
         GLCHK( glDrawElements(GL_TRIANGLES, 3*2, GL_UNSIGNED_INT, 0) );
     }
-    for(int i = 0; i < image->conversionNHItersSmall; i++){
+    for(int i = 0; i < image->properties->NormalHeightConv.Small; i++){
         GLCHK( program->setUniformValue("hn_min_max_scale",QVector3D(-0.0,1.0,pow(2.0,1))) );
         GLCHK( heightFBO->bind() );
         GLCHK( glActiveTexture(GL_TEXTURE0) );
@@ -2184,7 +2131,7 @@ void GLImage::applyNormalToHeight(FBOImageProporties* image,QGLFramebufferObject
         GLCHK( glBindTexture(GL_TEXTURE_2D, heightFBO->texture()) );
         GLCHK( glDrawElements(GL_TRIANGLES, 3*2, GL_UNSIGNED_INT, 0) );
     }
-    for(int i = 0; i < image->conversionNHItersVerySmall; i++){
+    for(int i = 0; i < image->properties->NormalHeightConv.VerySmall; i++){
         GLCHK( program->setUniformValue("hn_min_max_scale",QVector3D(-0.0,1.0,pow(2.0,0))) );
         GLCHK( heightFBO->bind() );
         GLCHK( glActiveTexture(GL_TEXTURE0) );
@@ -2216,8 +2163,8 @@ void GLImage::applyNormalAngleCorrectionFilter(QGLFramebufferObject* inputFBO,
 
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
-    GLCHK( program->setUniformValue("base_map_angle_correction"  , activeImage->baseMapAngleCorrection/180.0f*3.1415926f) );
-    GLCHK( program->setUniformValue("base_map_angle_weight"      , activeImage->baseMapAngleWeight/100.0f) );
+    GLCHK( program->setUniformValue("base_map_angle_correction"  , BaseMapToOthersProp.AngleCorrection/180.0f*3.1415926f) );
+    GLCHK( program->setUniformValue("base_map_angle_weight"      , BaseMapToOthersProp.AngleWeight) );
 
     GLCHK( glViewport(0,0,inputFBO->width(),inputFBO->height()) );
     GLCHK( outputFBO->bind() );
@@ -2269,10 +2216,10 @@ void GLImage::applyMixNormalLevels(GLuint level0,
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
 
-    GLCHK( program->setUniformValue("gui_base_map_w0"  , activeImage->baseMapConvLevels[0].conversionBaseMapWeight/100.0f ) );
-    GLCHK( program->setUniformValue("gui_base_map_w1"  , activeImage->baseMapConvLevels[1].conversionBaseMapWeight/100.0f ) );
-    GLCHK( program->setUniformValue("gui_base_map_w2"  , activeImage->baseMapConvLevels[2].conversionBaseMapWeight/100.0f ) );
-    GLCHK( program->setUniformValue("gui_base_map_w3"  , activeImage->baseMapConvLevels[3].conversionBaseMapWeight/100.0f ) );
+    GLCHK( program->setUniformValue("gui_base_map_w0"  , activeImage->properties->BaseMapToOthers.WeightSmall ) );
+    GLCHK( program->setUniformValue("gui_base_map_w1"  , activeImage->properties->BaseMapToOthers.WeightMedium ) );
+    GLCHK( program->setUniformValue("gui_base_map_w2"  , activeImage->properties->BaseMapToOthers.WeightBig) );
+    GLCHK( program->setUniformValue("gui_base_map_w3"  , activeImage->properties->BaseMapToOthers.WeightHuge ) );
 
     GLCHK( glViewport(0,0,outputFBO->width(),outputFBO->height()) );
     GLCHK( outputFBO->bind() );
@@ -2382,6 +2329,31 @@ void GLImage::applyCPUNormalizationFilter(QGLFramebufferObject* inputFBO,
 
 }
 
+void GLImage::applyAddNoiseFilter(QGLFramebufferObject* inputFBO,
+                                  QGLFramebufferObject* outputFBO){
+
+#ifdef USE_OPENGL_330
+    program = filter_programs["mode_add_noise_filter"];
+    program->bind();
+    updateProgramUniforms(0);
+#else
+    GLCHK( glUniformSubroutinesuiv( GL_FRAGMENT_SHADER, 1, &subroutines["mode_add_noise_filter"]) );
+#endif
+
+    GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
+    GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
+    GLCHK( program->setUniformValue("gui_add_noise_amp"  , float(targetImageHeight->properties->NormalHeightConv.NoiseLevel/100.0) ));
+
+    GLCHK( glViewport(0,0,inputFBO->width(),inputFBO->height()) );
+    GLCHK( outputFBO->bind() );
+    GLCHK( glActiveTexture(GL_TEXTURE0) );
+    GLCHK( glBindTexture(GL_TEXTURE_2D, inputFBO->texture()) );
+    GLCHK( glDrawElements(GL_TRIANGLES, 3*2, GL_UNSIGNED_INT, 0) );
+    GLCHK( outputFBO->bindDefault() );
+
+}
+
+
 void GLImage::applyBaseMapConversion(QGLFramebufferObject* baseMapFBO,
                                      QGLFramebufferObject *auxFBO,
                                      QGLFramebufferObject* outputFBO,BaseMapConvLevelProperties& convProp){
@@ -2442,10 +2414,10 @@ void GLImage::applyOcclusionFilter(GLuint height_tex,GLuint normal_tex,
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
 
-    GLCHK( program->setUniformValue("gui_ssao_no_iters"   ,targetImageOcclusion->ssaoNoIters) );
-    GLCHK( program->setUniformValue("gui_ssao_depth"      ,targetImageOcclusion->ssaoDepth) );
-    GLCHK( program->setUniformValue("gui_ssao_bias"       ,targetImageOcclusion->ssaoBias) );
-    GLCHK( program->setUniformValue("gui_ssao_intensity"  ,targetImageOcclusion->ssaoIntensity) );
+    GLCHK( program->setUniformValue("gui_ssao_no_iters"   ,AOProp.NumIters) );
+    GLCHK( program->setUniformValue("gui_ssao_depth"      ,AOProp.Depth) );
+    GLCHK( program->setUniformValue("gui_ssao_bias"       ,AOProp.Bias) );
+    GLCHK( program->setUniformValue("gui_ssao_intensity"  ,AOProp.Intensity) );
 
     GLCHK( glViewport(0,0,outputFBO->width(),outputFBO->height()) );
     GLCHK( outputFBO->bind() );
@@ -2462,7 +2434,7 @@ void GLImage::applyOcclusionFilter(GLuint height_tex,GLuint normal_tex,
 }
 
 void GLImage::applyHeightProcessingFilter(QGLFramebufferObject* inputFBO,
-                                           QGLFramebufferObject* outputFBO, bool bUseSelectiveBlur){
+                                           QGLFramebufferObject* outputFBO){
 
 #ifdef USE_OPENGL_330
     program = filter_programs["mode_height_processing_filter"];
@@ -2472,20 +2444,16 @@ void GLImage::applyHeightProcessingFilter(QGLFramebufferObject* inputFBO,
     GLCHK( glUniformSubroutinesuiv( GL_FRAGMENT_SHADER, 1, &subroutines["mode_height_processing_filter"]) );
 #endif
 
+
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
-    if(bUseSelectiveBlur){
-        GLCHK( program->setUniformValue("gui_height_proc_min_value"   ,activeImage->selectiveBlurMinValue) );
-        GLCHK( program->setUniformValue("gui_height_proc_max_value"   ,activeImage->selectiveBlurMaxValue) );
-        GLCHK( program->setUniformValue("gui_height_proc_ave_radius"  ,activeImage->selectiveBlurDetails) );
-        GLCHK( program->setUniformValue("gui_height_proc_offset_value",activeImage->selectiveBlurOffsetValue) );
-    }else{
-        GLCHK( program->setUniformValue("gui_height_proc_min_value"   ,activeImage->heightMinValue) );
-        GLCHK( program->setUniformValue("gui_height_proc_max_value"   ,activeImage->heightMaxValue) );
-        GLCHK( program->setUniformValue("gui_height_proc_ave_radius"  ,activeImage->heightAveragingRadius) );
-        GLCHK( program->setUniformValue("gui_height_proc_offset_value",activeImage->heightOffsetValue) );
-        GLCHK( program->setUniformValue("gui_height_proc_normalization",activeImage->bHeightEnableNormalization) );
-    }
+
+    GLCHK( program->setUniformValue("gui_height_proc_min_value"   ,ColorLevelsProp.MinValue) );
+    GLCHK( program->setUniformValue("gui_height_proc_max_value"   ,ColorLevelsProp.MaxValue) );
+    GLCHK( program->setUniformValue("gui_height_proc_ave_radius"  ,int(ColorLevelsProp.DetailsRadius*100.0) ));
+    GLCHK( program->setUniformValue("gui_height_proc_offset_value",ColorLevelsProp.Offset) );
+    GLCHK( program->setUniformValue("gui_height_proc_normalization",ColorLevelsProp.EnableNormalization) );
+
     GLCHK( glViewport(0,0,inputFBO->width(),inputFBO->height()) );
     GLCHK( outputFBO->bind() );
     GLCHK( glActiveTexture(GL_TEXTURE0) );
@@ -2526,7 +2494,7 @@ void GLImage::applyRoughnessFilter(QGLFramebufferObject* inputFBO,
                                     QGLFramebufferObject* outputFBO){
 
     // do the gaussian filter
-    applyGaussFilter(inputFBO,auxFBO,outputFBO,int(activeImage->roughnessDepth));
+    applyGaussFilter(inputFBO,auxFBO,outputFBO,int(RMFilterProp.NoiseFilter.Depth));
 
     copyFBO(outputFBO,auxFBO);
 
@@ -2541,9 +2509,9 @@ void GLImage::applyRoughnessFilter(QGLFramebufferObject* inputFBO,
 
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
-    GLCHK( program->setUniformValue("gui_roughness_depth"     ,  activeImage->roughnessDepth ) );
-    GLCHK( program->setUniformValue("gui_roughness_treshold"  ,  activeImage->roughnessTreshold) );
-    GLCHK( program->setUniformValue("gui_roughness_amplifier"  ,  activeImage->roughnessAmplifier) );
+    GLCHK( program->setUniformValue("gui_roughness_depth"     ,  RMFilterProp.NoiseFilter.Depth ) );
+    GLCHK( program->setUniformValue("gui_roughness_treshold"  ,  RMFilterProp.NoiseFilter.Treshold) );
+    GLCHK( program->setUniformValue("gui_roughness_amplifier"  , RMFilterProp.NoiseFilter.Amplifier) );
 
 
     GLCHK( glViewport(0,0,inputFBO->width(),inputFBO->height()) );
@@ -2572,13 +2540,17 @@ void GLImage::applyRoughnessColorFilter(QGLFramebufferObject* inputFBO,
 
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
-    GLCHK( program->setUniformValue("gui_roughness_picked_color"  , activeImage->pickedColor ) );
-    GLCHK( program->setUniformValue("gui_roughness_color_method"  , activeImage->colorPickerMethod) );
-    GLCHK( program->setUniformValue("gui_roughness_color_offset"  , activeImage->roughnessColorOffset) );
-    GLCHK( program->setUniformValue("gui_roughness_color_global_offset"  , activeImage->roughnessColorGlobalOffset) );
 
-    GLCHK( program->setUniformValue("gui_roughness_invert_mask"   , activeImage->bRoughnessInvertColorMask) );
-    GLCHK( program->setUniformValue("gui_roughness_color_amplifier", activeImage->roughnessColorAmplifier) );
+    QColor color = QColor(RMFilterProp.ColorFilter.PickColor);
+    QVector3D dcolor(color.redF(),color.greenF(),color.blueF());
+
+    GLCHK( program->setUniformValue("gui_roughness_picked_color"  , dcolor ) );
+    GLCHK( program->setUniformValue("gui_roughness_color_method"  , (int)RMFilterProp.ColorFilter.Method) );
+    GLCHK( program->setUniformValue("gui_roughness_color_offset"  , RMFilterProp.ColorFilter.Bias ) );
+    GLCHK( program->setUniformValue("gui_roughness_color_global_offset"  , RMFilterProp.ColorFilter.Offset) );
+
+    GLCHK( program->setUniformValue("gui_roughness_invert_mask"   , RMFilterProp.ColorFilter.InvertColors ) );
+    GLCHK( program->setUniformValue("gui_roughness_color_amplifier", RMFilterProp.ColorFilter.Amplifier ) );
 
     GLCHK( glViewport(0,0,inputFBO->width(),inputFBO->height()) );
     GLCHK( outputFBO->bind() );
@@ -2667,7 +2639,9 @@ void GLImage::applyGrungeImageFilter (QGLFramebufferObject* inputFBO,
 #endif
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
-    GLCHK( program->setUniformValue("gui_hn_conversion_depth", activeImage->grungeImageWeight/25.0f*targetImageGrunge->grungeOverallWeight/100.0f) );
+
+
+    GLCHK( program->setUniformValue("gui_hn_conversion_depth", 2*GrungeOnImageProp.GrungeWeight * GrungeProp.OverallWeight) );
     GLCHK( glViewport(0,0,auxFBO3->width(),auxFBO3->height()) );
     GLCHK( auxFBO3->bind() );
     GLCHK( glBindTexture(GL_TEXTURE_2D, grungeFBO->texture()) );
@@ -2684,7 +2658,7 @@ void GLImage::applyGrungeImageFilter (QGLFramebufferObject* inputFBO,
 
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
-    float weight = activeImage->grungeMainImageWeight/2.0;
+    float weight = 2*GrungeOnImageProp.ImageWeight;
 
     GLCHK( program->setUniformValue("gui_normal_mixer_depth", weight) );
     GLCHK( program->setUniformValue("gui_normal_mixer_angle", 0.0f) );
@@ -2717,9 +2691,10 @@ void GLImage::applyGrungeImageFilter (QGLFramebufferObject* inputFBO,
 
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
-    float weight = targetImageGrunge->grungeOverallWeight/100.0 * activeImage->grungeImageWeight/100.0;
+    float weight = GrungeOnImageProp.GrungeWeight * GrungeProp.OverallWeight;
+
     GLCHK( program->setUniformValue("gui_grunge_overall_weight"  , weight ) );
-    GLCHK( program->setUniformValue("gui_grunge_blending_mode"  , (int)activeImage->grungeBlendingMode) );
+    GLCHK( program->setUniformValue("gui_grunge_blending_mode"  , (int)GrungeOnImageProp.BlendingMode) );
 
 
 
@@ -2751,15 +2726,15 @@ void GLImage::applyGrungeRandomizationFilter(QGLFramebufferObject* inputFBO,
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
     QMatrix3x3 random_angles;
-    qsrand(activeImage->grungeSeed);
+    qsrand(GrungeProp.Randomize);
     for(int i = 0; i < 9; i++)random_angles.data()[i] = 3.1415*qrand()/(RAND_MAX+0.0);
     GLCHK( program->setUniformValue("gui_seamless_random_angles" , random_angles) );
     float phase = 3.1415*qrand()/(RAND_MAX+0.0);
     GLCHK( program->setUniformValue("gui_seamless_random_phase" , phase) );
-    GLCHK( program->setUniformValue("gui_grunge_radius"    , activeImage->grungeRadius) );
-    GLCHK( program->setUniformValue("gui_grunge_brandomize" , bool(activeImage->grungeSeed!=0)) );
+    GLCHK( program->setUniformValue("gui_grunge_radius"    , GrungeProp.Scale) );
+    GLCHK( program->setUniformValue("gui_grunge_brandomize" , bool(GrungeProp.Randomize!=0)) );
 
-    GLCHK( program->setUniformValue("gui_grunge_translations" , int(activeImage->bGrungeEnableRandomTranslations) ) );
+    GLCHK( program->setUniformValue("gui_grunge_translations" , int(GrungeProp.RandomTranslations) ) );
 
 
     GLCHK( glViewport(0,0,inputFBO->width(),inputFBO->height()) );
@@ -2788,7 +2763,7 @@ void GLImage::applyGrungeWarpNormalFilter(QGLFramebufferObject* inputFBO,
 
     GLCHK( program->setUniformValue("quad_scale", QVector2D(1.0,1.0)) );
     GLCHK( program->setUniformValue("quad_pos"  , QVector2D(0.0,0.0)) );
-    GLCHK( program->setUniformValue("grunge_normal_warp"  , activeImage->grungeNormalWarp/100.0f) );
+    GLCHK( program->setUniformValue("grunge_normal_warp"  , GrungeProp.NormalWarp) );
 
     GLCHK( glViewport(0,0,outputFBO->width(),outputFBO->height()) );
     GLCHK( outputFBO->bind() );
@@ -2838,8 +2813,6 @@ void GLImage::makeScreenQuad()
             texCoords[iter] = (QVector2D(x,y));
             iter++;
     }}
-
-
 
     glGenBuffers(3, &vbos[0]);
     glBindBuffer(GL_ARRAY_BUFFER, vbos[0]);
@@ -2910,8 +2883,6 @@ void GLImage::wheelEvent(QWheelEvent *event){
     } else
       qDebug() << Q_FUNC_INFO << "invalid context.";
 
-
-
     QPoint p = mapFromGlobal(QCursor::pos());//getting the global position of cursor
     // restoring the translation after zooming
     xTranslation =        double(p.x())/width() *orthographicProjWidth  - cursorPhysicalXPosition;
@@ -2950,8 +2921,6 @@ void GLImage::relativeMouseMoveEvent(int dx, int dy, bool* wrapMouse, Qt::MouseB
         msgBox.exec();
         return;
     }
-
-
 
     if(activeImage->imageType == OCCLUSION_TEXTURE && buttons & Qt::LeftButton){
         QMessageBox msgBox;
@@ -3061,8 +3030,6 @@ void GLImage::relativeMouseMoveEvent(int dx, int dy, bool* wrapMouse, Qt::MouseB
     }
 
 
-
-
     if (buttons & Qt::RightButton){
         xTranslation += dx*(float(orthographicProjWidth)/width());
         yTranslation -= dy*(float(orthographicProjHeight)/height());
@@ -3099,7 +3066,9 @@ void GLImage::mousePressEvent(QMouseEvent *event)
         glReadPixels(event->pos().x(), height()-event->pos().y(), 1, 1,GL_RGBA, GL_UNSIGNED_BYTE, &pixels[0]);
         QVector4D color(pixels[0],pixels[1],pixels[2],pixels[3]);
         qDebug() << "Picked pixel (" << event->pos().x() << " , " << height()-event->pos().y() << ") with color:" << color;
-        emit colorPicked(color);
+
+        QColor qcolor = QColor(pixels[0],pixels[1],pixels[2]);
+        if(ptr_ABColor != NULL) ptr_ABColor->setValue(qcolor);
         toggleColorPicking(false);
     }
 
@@ -3108,13 +3077,33 @@ void GLImage::mouseReleaseEvent(QMouseEvent *event){
     setCursor(Qt::OpenHandCursor);
     draggingCorner = -1;
     event->accept();
+    bSkipProcessing = true;
     repaint();
 }
 
 void GLImage::toggleColorPicking(bool toggle){
     bToggleColorPicking = toggle;
+    ptr_ABColor = NULL;
     if(toggle){
         setCursor(Qt::UpArrowCursor);
     }else
         setCursor(Qt::PointingHandCursor);
+}
+
+void GLImage::pickImageColor( QtnPropertyABColor* property) {
+    bool toggle = true;
+    bToggleColorPicking = toggle;
+    ptr_ABColor = property;
+    if(toggle){
+        setCursor(Qt::UpArrowCursor);
+    }else
+        setCursor(Qt::PointingHandCursor);
+    repaint();
+}
+
+void GLImage::copyRenderToPaintFBO(){
+     GLCHK(FBOImages::resize(paintFBO,renderFBO->width(),renderFBO->height()));
+     GLCHK( program->setUniformValue("material_id", int(-1)) );
+     copyFBO(renderFBO,paintFBO);
+     bRendering      = false;
 }
